@@ -25,7 +25,7 @@ func (h *MyHandler) Handle(param any) {
 	// do your own business
 }
 
-tw = timewheel.New(
+tw := timewheel.New(
     timewheel.WithHandler(new(MyHandler)),
     timewheel.WithLogger(timewheel.Printf),
     timewheel.WithSlotNum(10),

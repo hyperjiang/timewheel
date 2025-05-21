@@ -15,7 +15,7 @@ type TimeWheel struct {
 	currentPos   int          // the current position of the time wheel (the current slot)
 	addTaskCh    chan Task    // channel for adding tasks
 	removeTaskCh chan any     // channel for removing tasks
-	stopChannel  chan bool    // channel for stopping the time wheel
+	stopCh       chan bool    // channel for stopping the time wheel
 	mu           sync.Mutex
 }
 
@@ -26,7 +26,7 @@ func New(opts ...Option) *TimeWheel {
 		taskList:     make(map[any]int),
 		addTaskCh:    make(chan Task),
 		removeTaskCh: make(chan any),
-		stopChannel:  make(chan bool),
+		stopCh:       make(chan bool),
 	}
 	tw.slots = make([]*list.List, tw.SlotNum)
 
@@ -46,12 +46,12 @@ func (tw *TimeWheel) initSlots() {
 // Start starts the time wheel.
 func (tw *TimeWheel) Start() {
 	tw.ticker = time.NewTicker(tw.TickDuration)
-	go tw.start()
+	go tw.watch()
 }
 
 // Stop stops the time wheel.
 func (tw *TimeWheel) Stop() {
-	tw.stopChannel <- true
+	tw.stopCh <- true
 }
 
 // AddTask adds a task to the time wheel.
@@ -75,28 +75,28 @@ func (tw *TimeWheel) RemoveTask(key any) {
 	tw.removeTaskCh <- key
 }
 
-func (tw *TimeWheel) start() {
+func (tw *TimeWheel) watch() {
 	for {
 		select {
 		case <-tw.ticker.C:
-			tw.tickHandler()
+			tw.runTask()
 		case task := <-tw.addTaskCh:
 			tw.addTask(&task)
 		case key := <-tw.removeTaskCh:
 			tw.removeTask(key)
-		case <-tw.stopChannel:
+		case <-tw.stopCh:
 			tw.ticker.Stop()
 			return
 		}
 	}
 }
 
-// tickHandler handles the tick event of the time wheel.
+// runTask will be called every tick.
 // It scans the current slot and executes the tasks that are due.
 // After executing the tasks, it moves to the next slot.
 // If it reaches the last slot, it resets to the first slot.
 // The tick event is triggered by the ticker.
-func (tw *TimeWheel) tickHandler() {
+func (tw *TimeWheel) runTask() {
 	tw.mu.Lock()
 	defer tw.mu.Unlock()
 
@@ -112,8 +112,8 @@ func (tw *TimeWheel) tickHandler() {
 func (tw *TimeWheel) scanAndRunTask(l *list.List) {
 	for e := l.Front(); e != nil; {
 		task := e.Value.(*Task)
-		if task.circle > 0 {
-			task.circle--
+		if task.cycle > 0 {
+			task.cycle--
 			e = e.Next()
 			continue
 		}
@@ -138,14 +138,14 @@ func (tw *TimeWheel) addTask(task *Task) {
 		tw.mu.Unlock()
 	}
 
-	pos, circle := tw.getPositionAndCircle(task.delay)
-	task.circle = circle
+	pos, cycle := tw.getPositionAndCycle(task.delay)
+	task.cycle = cycle
 
-	tw.Logger.Printf("[%d] task %v add to position %d, circle %d\n", tw.currentPos, task.key, pos, circle)
+	tw.Logger.Printf("[%d] task %v add to position %d, cycle %d\n", tw.currentPos, task.key, pos, cycle)
 
-	// if the task is already in the current position and circle is 0, execute it immediately
+	// if the task is already in the current position and cycle is 0, execute it immediately
 	// this is to avoid the task missing execution due to the lock
-	if pos == tw.currentPos && circle == 0 {
+	if pos == tw.currentPos && cycle == 0 {
 		tw.Logger.Printf("[%d] task %v execute immediately\n", tw.currentPos, task.key)
 		go tw.Handler.Handle(task.data)
 		return
@@ -159,11 +159,11 @@ func (tw *TimeWheel) addTask(task *Task) {
 }
 
 // Get the position of the task in the slot and the number of turns the time wheel needs to rotate before executing the task.
-func (tw *TimeWheel) getPositionAndCircle(d time.Duration) (pos int, circle int) {
+func (tw *TimeWheel) getPositionAndCycle(d time.Duration) (pos int, cycle int) {
 	delayNs := d.Nanoseconds()
 	intervalNs := tw.TickDuration.Nanoseconds()
 	steps := int(delayNs / intervalNs)
-	circle = steps / tw.SlotNum
+	cycle = steps / tw.SlotNum
 	pos = (tw.currentPos + steps) % tw.SlotNum
 	return
 }
