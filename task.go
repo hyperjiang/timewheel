@@ -6,6 +6,6 @@ import "time"
 type Task struct {
 	delay time.Duration // the delay time of the task
 	cycle int           // the cycles to wait before executing the task
-	key   any           // the unique key of the task, used for removing the task
+	key   string        // the unique key of the task, used for removing the task
 	data  any           // the data of the task
 }

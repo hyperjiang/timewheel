@@ -4,8 +4,9 @@ import (
 	"time"
 )
 
+// default is a 1 minute time wheel with 60 slots and 1 second tick duration.
 const (
-	defaultSlotNum      = 10
+	defaultSlotNum      = 60
 	defaultTickDuration = 1 * time.Second
 )
 

@@ -4,18 +4,20 @@ import (
 	"container/list"
 	"sync"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // TimeWheel is the main structure of the time wheel.
 type TimeWheel struct {
 	Options      // inherited options
 	ticker       *time.Ticker
-	slots        []*list.List // the slots of the time wheel, each slot is a linked list
-	taskList     map[any]int  // key: task unique key, value: slot position
-	currentPos   int          // the current position of the time wheel (the current slot)
-	addTaskCh    chan Task    // channel for adding tasks
-	removeTaskCh chan any     // channel for removing tasks
-	stopCh       chan bool    // channel for stopping the time wheel
+	slots        []*list.List   // the slots of the time wheel, each slot is a linked list
+	taskList     map[string]int // key: task unique key, value: slot position
+	currentPos   int            // the current position of the time wheel (the current slot)
+	addTaskCh    chan Task      // channel for adding tasks
+	removeTaskCh chan string    // channel for removing tasks
+	stopCh       chan bool      // channel for stopping the time wheel
 	mu           sync.Mutex
 }
 
@@ -23,9 +25,9 @@ func New(opts ...Option) *TimeWheel {
 	tw := &TimeWheel{
 		Options:      NewOptions(opts...),
 		currentPos:   0,
-		taskList:     make(map[any]int),
+		taskList:     make(map[string]int),
 		addTaskCh:    make(chan Task),
-		removeTaskCh: make(chan any),
+		removeTaskCh: make(chan string),
 		stopCh:       make(chan bool),
 	}
 	tw.slots = make([]*list.List, tw.SlotNum)
@@ -56,23 +58,33 @@ func (tw *TimeWheel) Stop() {
 
 // AddTask adds a task to the time wheel.
 // The task will be executed after the specified delay.
-// The key is used to identify the task and can be used to remove it later.
 // The data is the payload of the task that will be passed to the handler.
 // If the delay is negative, the task will not be added.
-func (tw *TimeWheel) AddTask(delay time.Duration, key any, data any) {
-	if delay < 0 || key == nil {
-		tw.Logger.Printf("task %v add failed, delay: %v\n", key, delay)
-		return
+// The function returns a unique key for the task, which can be used to remove the task later.
+func (tw *TimeWheel) AddTask(delay time.Duration, data any) string {
+	if delay < 0 {
+		tw.Logger.Printf("delay is negative, skip adding task\n")
+		return ""
 	}
+
+	key := uuid.NewString()
+
 	tw.addTaskCh <- Task{delay: delay, key: key, data: data}
+
+	return key
 }
 
 // RemoveTask removes a task from the time wheel.
-func (tw *TimeWheel) RemoveTask(key any) {
-	if key == nil {
-		return
-	}
+func (tw *TimeWheel) RemoveTask(key string) {
 	tw.removeTaskCh <- key
+}
+
+// GetTaskSize returns the number of tasks in the time wheel.
+func (tw *TimeWheel) GetTaskSize() int {
+	tw.mu.Lock()
+	defer tw.mu.Unlock()
+
+	return len(tw.taskList)
 }
 
 func (tw *TimeWheel) watch() {
@@ -118,6 +130,7 @@ func (tw *TimeWheel) scanAndRunTask(l *list.List) {
 			continue
 		}
 
+		task.delay -= tw.TickDuration
 		go tw.Handler.Handle(task.data)
 
 		next := e.Next()
@@ -128,16 +141,6 @@ func (tw *TimeWheel) scanAndRunTask(l *list.List) {
 }
 
 func (tw *TimeWheel) addTask(task *Task) {
-	if task.key != nil {
-		tw.mu.Lock()
-		if _, exists := tw.taskList[task.key]; exists {
-			tw.mu.Unlock()
-			tw.Logger.Printf("task key %v already exists, skip\n", task.key)
-			return
-		}
-		tw.mu.Unlock()
-	}
-
 	pos, cycle := tw.getPositionAndCycle(task.delay)
 	task.cycle = cycle
 
@@ -168,7 +171,7 @@ func (tw *TimeWheel) getPositionAndCycle(d time.Duration) (pos int, cycle int) {
 	return
 }
 
-func (tw *TimeWheel) removeTask(key any) {
+func (tw *TimeWheel) removeTask(key string) {
 	tw.mu.Lock()
 	defer tw.mu.Unlock()
 
@@ -183,6 +186,7 @@ func (tw *TimeWheel) removeTask(key any) {
 		if task.key == key {
 			delete(tw.taskList, task.key)
 			l.Remove(e)
+			return
 		}
 
 		e = e.Next()

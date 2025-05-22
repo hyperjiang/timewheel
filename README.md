@@ -34,6 +34,6 @@ tw := timewheel.New(
 
 tw.Start()
 
-tw.AddTask(time.Second, "task_unique_key_1", "1s")
-tw.AddTask(time.Second*10, "task_unique_key_2", "10s")
+tw.AddTask(time.Second, "1s")
+tw.AddTask(time.Second*10, "10s")
 ```
