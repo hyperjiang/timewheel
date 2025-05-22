@@ -62,13 +62,7 @@ func (tw *TimeWheel) Stop() {
 // If the delay is negative, the task will not be added.
 // The function returns a unique key for the task, which can be used to remove the task later.
 func (tw *TimeWheel) AddTask(delay time.Duration, data any) string {
-	if delay < 0 {
-		tw.Logger.Printf("delay is negative, skip adding task\n")
-		return ""
-	}
-
 	key := uuid.NewString()
-
 	tw.addTaskCh <- Task{delay: delay, key: key, data: data}
 
 	return key
@@ -83,6 +77,8 @@ func (tw *TimeWheel) RemoveTask(key string) {
 func (tw *TimeWheel) GetTaskSize() int {
 	tw.mu.Lock()
 	defer tw.mu.Unlock()
+
+	tw.Logger.Printf("[%d] current task size: %d\n", tw.currentPos, len(tw.taskList))
 
 	return len(tw.taskList)
 }
@@ -163,11 +159,19 @@ func (tw *TimeWheel) addTask(task *Task) {
 
 // Get the position of the task in the slot and the number of turns the time wheel needs to rotate before executing the task.
 func (tw *TimeWheel) getPositionAndCycle(d time.Duration) (pos int, cycle int) {
+	if d < 0 {
+		cycle = 0
+		pos = tw.currentPos
+		return
+	}
+
 	delayNs := d.Nanoseconds()
 	intervalNs := tw.TickDuration.Nanoseconds()
 	steps := int(delayNs / intervalNs)
+
 	cycle = steps / tw.SlotNum
 	pos = (tw.currentPos + steps) % tw.SlotNum
+
 	return
 }
 
