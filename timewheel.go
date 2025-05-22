@@ -8,6 +8,8 @@ import (
 	"github.com/google/uuid"
 )
 
+const logPrefix = "[timewheel]"
+
 // TimeWheel is the main structure of the time wheel.
 type TimeWheel struct {
 	Options      // inherited options
@@ -63,7 +65,7 @@ func (tw *TimeWheel) Stop() {
 // The function returns a unique key for the task, which can be used to remove the task later.
 func (tw *TimeWheel) AddTask(delay time.Duration, data any) string {
 	key := uuid.NewString()
-	tw.addTaskCh <- Task{delay: delay, key: key, data: data}
+	tw.addTaskCh <- Task{scheduledAt: time.Now().Add(delay), delay: delay, key: key, data: data}
 
 	return key
 }
@@ -78,7 +80,7 @@ func (tw *TimeWheel) GetTaskSize() int {
 	tw.mu.Lock()
 	defer tw.mu.Unlock()
 
-	tw.Logger.Printf("[%d] current task size: %d\n", tw.currentPos, len(tw.taskList))
+	tw.Logger.Printf("%s[%d] current task size: %d\n", logPrefix, tw.currentPos, len(tw.taskList))
 
 	return len(tw.taskList)
 }
@@ -126,7 +128,8 @@ func (tw *TimeWheel) scanAndRunTask(l *list.List) {
 			continue
 		}
 
-		task.delay -= tw.TickDuration
+		tw.Logger.Printf("%s[%d] run task %v, scheduled at %s\n", logPrefix, tw.currentPos, task.key, task.scheduledAt.Format("15:04:05.000"))
+
 		go tw.Handler.Handle(task.data)
 
 		next := e.Next()
@@ -140,12 +143,12 @@ func (tw *TimeWheel) addTask(task *Task) {
 	pos, cycle := tw.getPositionAndCycle(task.delay)
 	task.cycle = cycle
 
-	tw.Logger.Printf("[%d] task %v add to position %d, cycle %d\n", tw.currentPos, task.key, pos, cycle)
+	tw.Logger.Printf("%s[%d] add task %v to position %d, cycle %d, scheduled at %s\n", logPrefix, tw.currentPos, task.key, pos, cycle, task.scheduledAt.Format("15:04:05.000"))
 
 	// if the task is already in the current position and cycle is 0, execute it immediately
 	// this is to avoid the task missing execution due to the lock
 	if pos == tw.currentPos && cycle == 0 {
-		tw.Logger.Printf("[%d] task %v execute immediately\n", tw.currentPos, task.key)
+		tw.Logger.Printf("%s[%d] run task %v immediately\n", logPrefix, tw.currentPos, task.key)
 		go tw.Handler.Handle(task.data)
 		return
 	}

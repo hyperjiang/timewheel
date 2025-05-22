@@ -53,9 +53,9 @@ func (ts *TimeWheelTestSuite) TestRunTask() {
 
 	should.Zero(ts.tw.GetTaskSize())
 
+	ts.tw.AddTask(time.Millisecond*500, "500ms")
 	ts.tw.AddTask(time.Millisecond*300, "300ms")
-	ts.tw.AddTask(time.Millisecond*100, "100ms")
-	k := ts.tw.AddTask(time.Millisecond*100, "100ms")
+	k := ts.tw.AddTask(time.Millisecond*300, "300ms")
 	ts.tw.RemoveTask(k)
 	ts.tw.AddTask(time.Millisecond*800, "800ms")
 	ts.tw.AddTask(time.Second, "1s")
