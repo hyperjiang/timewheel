@@ -62,6 +62,7 @@ func (ts *TimeWheelTestSuite) TestRunTask() {
 	ts.tw.AddTask(time.Second*2, "2s")
 	ts.tw.AddTask(time.Millisecond*1500, "1.5s")
 
+	time.Sleep(time.Millisecond * 100)
 	should.Equal(6, ts.tw.GetTaskSize())
 
 	ts.tw.RemoveTask("fake-key") // will be ignored because it is not in the task list
