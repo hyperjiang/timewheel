@@ -2,6 +2,7 @@ package timewheel
 
 import (
 	"container/list"
+	"errors"
 	"sync"
 	"time"
 
@@ -9,6 +10,10 @@ import (
 )
 
 const logPrefix = "[timewheel]"
+
+var (
+	ErrStopped = errors.New("timewheel stopped")
+)
 
 // TimeWheel is the main structure of the time wheel.
 type TimeWheel struct {
@@ -19,7 +24,8 @@ type TimeWheel struct {
 	currentPos   int            // the current position of the time wheel (the current slot)
 	addTaskCh    chan Task      // channel for adding tasks
 	removeTaskCh chan string    // channel for removing tasks
-	stopCh       chan bool      // channel for stopping the time wheel
+	stopCh       chan struct{}  // channel for stopping the time wheel
+	stopped      bool
 	mu           sync.Mutex
 }
 
@@ -30,7 +36,7 @@ func New(opts ...Option) *TimeWheel {
 		taskList:     make(map[string]int),
 		addTaskCh:    make(chan Task),
 		removeTaskCh: make(chan string),
-		stopCh:       make(chan bool),
+		stopCh:       make(chan struct{}),
 	}
 	tw.slots = make([]*list.List, tw.SlotNum)
 
@@ -49,25 +55,56 @@ func (tw *TimeWheel) initSlots() {
 
 // Start starts the time wheel.
 func (tw *TimeWheel) Start() {
+	tw.mu.Lock()
+	if tw.stopped {
+		tw.mu.Unlock()
+		return
+	}
+	tw.mu.Unlock()
 	tw.ticker = time.NewTicker(tw.TickDuration)
 	go tw.watch()
 }
 
 // Stop stops the time wheel.
 func (tw *TimeWheel) Stop() {
-	tw.stopCh <- true
+	tw.mu.Lock()
+	if tw.stopped {
+		tw.mu.Unlock()
+		return
+	}
+	tw.stopped = true
+	close(tw.stopCh)
+	close(tw.addTaskCh)
+	close(tw.removeTaskCh)
+	t := tw.ticker
+	tw.mu.Unlock()
+	if t != nil {
+		t.Stop()
+	}
 }
 
 // AddTask adds a task to the time wheel.
 // The task will be executed after the specified delay.
 // The data is the payload of the task that will be passed to the handler.
-// If the delay is negative, the task will not be added.
+// If the delay is negative, the task will be executed immediately instead of being added to the time wheel.
 // The function returns a unique key for the task, which can be used to remove the task later.
-func (tw *TimeWheel) AddTask(delay time.Duration, data any) string {
+func (tw *TimeWheel) AddTask(delay time.Duration, data any) (string, error) {
 	key := uuid.NewString()
-	tw.addTaskCh <- Task{scheduledAt: time.Now().Add(delay), delay: delay, key: key, data: data}
+	t := Task{scheduledAt: time.Now().Add(delay), delay: delay, key: key, data: data}
 
-	return key
+	tw.mu.Lock()
+	if tw.stopped {
+		tw.mu.Unlock()
+		return "", ErrStopped
+	}
+	tw.mu.Unlock()
+
+	select {
+	case tw.addTaskCh <- t:
+		return key, nil
+	case <-tw.stopCh:
+		return "", ErrStopped
+	}
 }
 
 // RemoveTask removes a task from the time wheel.
@@ -90,12 +127,17 @@ func (tw *TimeWheel) watch() {
 		select {
 		case <-tw.ticker.C:
 			tw.runTask()
-		case task := <-tw.addTaskCh:
+		case task, ok := <-tw.addTaskCh:
+			if !ok {
+				return
+			}
 			tw.addTask(&task)
-		case key := <-tw.removeTaskCh:
+		case key, ok := <-tw.removeTaskCh:
+			if !ok {
+				return
+			}
 			tw.removeTask(key)
 		case <-tw.stopCh:
-			tw.ticker.Stop()
 			return
 		}
 	}

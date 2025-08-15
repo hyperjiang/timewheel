@@ -48,19 +48,28 @@ func (ts *TimeWheelTestSuite) TestRunTask() {
 	should := require.New(ts.T())
 	should.Zero(ts.tw.GetTaskSize())
 
-	ts.tw.AddTask(-time.Millisecond*10, "-10ms") // run immediately
-	ts.tw.AddTask(time.Millisecond*10, "10ms")   // run immediately
+	_, err := ts.tw.AddTask(-time.Millisecond*10, "-10ms") // run immediately
+	should.NoError(err)
+	_, err = ts.tw.AddTask(time.Millisecond*10, "10ms") // run immediately
+	should.NoError(err)
 
 	should.Zero(ts.tw.GetTaskSize())
 
-	ts.tw.AddTask(time.Millisecond*500, "500ms")
-	ts.tw.AddTask(time.Millisecond*300, "300ms")
-	k := ts.tw.AddTask(time.Millisecond*300, "300ms")
+	_, err = ts.tw.AddTask(time.Millisecond*500, "500ms")
+	should.NoError(err)
+	_, err = ts.tw.AddTask(time.Millisecond*300, "300ms")
+	should.NoError(err)
+	k, err := ts.tw.AddTask(time.Millisecond*300, "300ms")
+	should.NoError(err)
 	ts.tw.RemoveTask(k)
-	ts.tw.AddTask(time.Millisecond*800, "800ms")
-	ts.tw.AddTask(time.Second, "1s")
-	ts.tw.AddTask(time.Second*2, "2s")
-	ts.tw.AddTask(time.Millisecond*1500, "1.5s")
+	_, err = ts.tw.AddTask(time.Millisecond*800, "800ms")
+	should.NoError(err)
+	_, err = ts.tw.AddTask(time.Second, "1s")
+	should.NoError(err)
+	_, err = ts.tw.AddTask(time.Second*2, "2s")
+	should.NoError(err)
+	_, err = ts.tw.AddTask(time.Millisecond*1500, "1.5s")
+	should.NoError(err)
 
 	time.Sleep(time.Millisecond * 100)
 	should.Equal(6, ts.tw.GetTaskSize())
