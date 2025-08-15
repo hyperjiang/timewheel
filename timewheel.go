@@ -101,6 +101,26 @@ func (tw *TimeWheel) watch() {
 	}
 }
 
+func (tw *TimeWheel) safeHandle(data any) {
+	defer func() {
+		if r := recover(); r != nil {
+			tw.Logger.Printf("%s handler panic recovered: %v", logPrefix, r)
+		}
+	}()
+	tw.Handler.Handle(data)
+}
+
+// Calculate the position of the task in the slot and the number of turns the time wheel needs to rotate before executing the task.
+func calcPositionAndCycle(delay time.Duration, tick time.Duration, slotNum int, currentPos int) (pos int, cycle int) {
+	if delay < 0 {
+		return currentPos, 0
+	}
+	steps := int(delay.Nanoseconds() / tick.Nanoseconds())
+	cycle = steps / slotNum
+	pos = (currentPos + steps) % slotNum
+	return
+}
+
 // runTask will be called every tick.
 // It scans the current slot and executes the tasks that are due.
 // After executing the tasks, it moves to the next slot.
@@ -128,9 +148,10 @@ func (tw *TimeWheel) scanAndRunTask(l *list.List) {
 			continue
 		}
 
-		tw.Logger.Printf("%s[%d] run task %v, scheduled at %s\n", logPrefix, tw.currentPos, task.key, task.scheduledAt.Format("15:04:05.000"))
+		tw.Logger.Printf("%s[%d] run task %v, scheduled at %s\n",
+			logPrefix, tw.currentPos, task.key, task.scheduledAt.Format("15:04:05.000"))
 
-		go tw.Handler.Handle(task.data)
+		go tw.safeHandle(task.data)
 
 		next := e.Next()
 		l.Remove(e)
@@ -140,42 +161,25 @@ func (tw *TimeWheel) scanAndRunTask(l *list.List) {
 }
 
 func (tw *TimeWheel) addTask(task *Task) {
-	pos, cycle := tw.getPositionAndCycle(task.delay)
-	task.cycle = cycle
+	tw.mu.Lock()
+	defer tw.mu.Unlock()
 
-	tw.Logger.Printf("%s[%d] add task %v to position %d, cycle %d, scheduled at %s\n", logPrefix, tw.currentPos, task.key, pos, cycle, task.scheduledAt.Format("15:04:05.000"))
+	pos, cycle := calcPositionAndCycle(task.delay, tw.TickDuration, tw.SlotNum, tw.currentPos)
+	task.cycle = cycle
 
 	// if the task is already in the current position and cycle is 0, execute it immediately
 	// this is to avoid the task missing execution due to the lock
 	if pos == tw.currentPos && cycle == 0 {
 		tw.Logger.Printf("%s[%d] run task %v immediately\n", logPrefix, tw.currentPos, task.key)
-		go tw.Handler.Handle(task.data)
+		go tw.safeHandle(task.data)
 		return
 	}
 
-	tw.mu.Lock()
-	defer tw.mu.Unlock()
+	tw.Logger.Printf("%s[%d] add task %v to position %d, cycle %d, scheduled at %s\n",
+		logPrefix, tw.currentPos, task.key, pos, cycle, task.scheduledAt.Format("15:04:05.000"))
 
 	tw.slots[pos].PushBack(task)
 	tw.taskList[task.key] = pos
-}
-
-// Get the position of the task in the slot and the number of turns the time wheel needs to rotate before executing the task.
-func (tw *TimeWheel) getPositionAndCycle(d time.Duration) (pos int, cycle int) {
-	if d < 0 {
-		cycle = 0
-		pos = tw.currentPos
-		return
-	}
-
-	delayNs := d.Nanoseconds()
-	intervalNs := tw.TickDuration.Nanoseconds()
-	steps := int(delayNs / intervalNs)
-
-	cycle = steps / tw.SlotNum
-	pos = (tw.currentPos + steps) % tw.SlotNum
-
-	return
 }
 
 func (tw *TimeWheel) removeTask(key string) {
