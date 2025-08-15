@@ -1,6 +1,9 @@
 package timewheel
 
-import "time"
+import (
+	"container/list"
+	"time"
+)
 
 // Task is the structure of a task in the time wheel.
 type Task struct {
@@ -9,4 +12,9 @@ type Task struct {
 	cycle       int           // the cycles to wait before executing the task
 	key         string        // the unique key of the task, used for removing the task
 	data        any           // the data of the task
+}
+
+type taskEntry struct {
+	slot int
+	elem *list.Element
 }

@@ -19,12 +19,12 @@ var (
 type TimeWheel struct {
 	Options      // inherited options
 	ticker       *time.Ticker
-	slots        []*list.List   // the slots of the time wheel, each slot is a linked list
-	taskList     map[string]int // key: task unique key, value: slot position
-	currentPos   int            // the current position of the time wheel (the current slot)
-	addTaskCh    chan Task      // channel for adding tasks
-	removeTaskCh chan string    // channel for removing tasks
-	stopCh       chan struct{}  // channel for stopping the time wheel
+	slots        []*list.List         // the slots of the time wheel, each slot is a linked list
+	taskIndex    map[string]taskEntry // key: task unique key, value: task entry, O(1) for removal
+	currentPos   int                  // the current position of the time wheel (the current slot)
+	addTaskCh    chan *Task           // channel for adding tasks
+	removeTaskCh chan string          // channel for removing tasks
+	stopCh       chan struct{}        // channel for stopping the time wheel
 	stopped      bool
 	mu           sync.Mutex
 }
@@ -32,9 +32,8 @@ type TimeWheel struct {
 func New(opts ...Option) *TimeWheel {
 	tw := &TimeWheel{
 		Options:      NewOptions(opts...),
-		currentPos:   0,
-		taskList:     make(map[string]int),
-		addTaskCh:    make(chan Task),
+		taskIndex:    make(map[string]taskEntry),
+		addTaskCh:    make(chan *Task),
 		removeTaskCh: make(chan string),
 		stopCh:       make(chan struct{}),
 	}
@@ -74,8 +73,6 @@ func (tw *TimeWheel) Stop() {
 	}
 	tw.stopped = true
 	close(tw.stopCh)
-	close(tw.addTaskCh)
-	close(tw.removeTaskCh)
 	t := tw.ticker
 	tw.mu.Unlock()
 	if t != nil {
@@ -90,7 +87,18 @@ func (tw *TimeWheel) Stop() {
 // The function returns a unique key for the task, which can be used to remove the task later.
 func (tw *TimeWheel) AddTask(delay time.Duration, data any) (string, error) {
 	key := uuid.NewString()
-	t := Task{scheduledAt: time.Now().Add(delay), delay: delay, key: key, data: data}
+
+	if delay < 0 {
+		go tw.safeHandle(data)
+		return key, nil
+	}
+
+	task := &Task{
+		scheduledAt: time.Now().Add(delay),
+		delay:       delay,
+		key:         key,
+		data:        data,
+	}
 
 	tw.mu.Lock()
 	if tw.stopped {
@@ -100,7 +108,7 @@ func (tw *TimeWheel) AddTask(delay time.Duration, data any) (string, error) {
 	tw.mu.Unlock()
 
 	select {
-	case tw.addTaskCh <- t:
+	case tw.addTaskCh <- task:
 		return key, nil
 	case <-tw.stopCh:
 		return "", ErrStopped
@@ -108,8 +116,20 @@ func (tw *TimeWheel) AddTask(delay time.Duration, data any) (string, error) {
 }
 
 // RemoveTask removes a task from the time wheel.
-func (tw *TimeWheel) RemoveTask(key string) {
-	tw.removeTaskCh <- key
+func (tw *TimeWheel) RemoveTask(key string) error {
+	tw.mu.Lock()
+	if tw.stopped {
+		tw.mu.Unlock()
+		return ErrStopped
+	}
+	tw.mu.Unlock()
+
+	select {
+	case tw.removeTaskCh <- key:
+		return nil
+	case <-tw.stopCh:
+		return ErrStopped
+	}
 }
 
 // GetTaskSize returns the number of tasks in the time wheel.
@@ -117,9 +137,9 @@ func (tw *TimeWheel) GetTaskSize() int {
 	tw.mu.Lock()
 	defer tw.mu.Unlock()
 
-	tw.Logger.Printf("%s[%d] current task size: %d\n", logPrefix, tw.currentPos, len(tw.taskList))
+	tw.Logger.Printf("%s[%d] current task size: %d\n", logPrefix, tw.currentPos, len(tw.taskIndex))
 
-	return len(tw.taskList)
+	return len(tw.taskIndex)
 }
 
 func (tw *TimeWheel) watch() {
@@ -127,15 +147,12 @@ func (tw *TimeWheel) watch() {
 		select {
 		case <-tw.ticker.C:
 			tw.runTask()
-		case task, ok := <-tw.addTaskCh:
-			if !ok {
+		case task := <-tw.addTaskCh:
+			if task == nil {
 				return
 			}
-			tw.addTask(&task)
-		case key, ok := <-tw.removeTaskCh:
-			if !ok {
-				return
-			}
+			tw.addTask(task)
+		case key := <-tw.removeTaskCh:
 			tw.removeTask(key)
 		case <-tw.stopCh:
 			return
@@ -169,19 +186,12 @@ func calcPositionAndCycle(delay time.Duration, tick time.Duration, slotNum int, 
 // If it reaches the last slot, it resets to the first slot.
 // The tick event is triggered by the ticker.
 func (tw *TimeWheel) runTask() {
+	var due []*Task
+
+	// scan due tasks first and release the lock,
+	// so that we can reduce the lock time
 	tw.mu.Lock()
-	defer tw.mu.Unlock()
-
 	l := tw.slots[tw.currentPos]
-	tw.scanAndRunTask(l)
-	if tw.currentPos == tw.SlotNum-1 { // already at the last slot, reset to 0
-		tw.currentPos = 0
-	} else {
-		tw.currentPos++
-	}
-}
-
-func (tw *TimeWheel) scanAndRunTask(l *list.List) {
 	for e := l.Front(); e != nil; {
 		task := e.Value.(*Task)
 		if task.cycle > 0 {
@@ -189,22 +199,37 @@ func (tw *TimeWheel) scanAndRunTask(l *list.List) {
 			e = e.Next()
 			continue
 		}
-
-		tw.Logger.Printf("%s[%d] run task %v, scheduled at %s\n",
-			logPrefix, tw.currentPos, task.key, task.scheduledAt.Format("15:04:05.000"))
-
-		go tw.safeHandle(task.data)
-
 		next := e.Next()
 		l.Remove(e)
-		delete(tw.taskList, task.key)
+		delete(tw.taskIndex, task.key)
 		e = next
+		due = append(due, task)
+	}
+
+	currentPos := tw.currentPos
+
+	if tw.currentPos == tw.SlotNum-1 { // already at the last slot, reset to 0
+		tw.currentPos = 0
+	} else {
+		tw.currentPos++
+	}
+	tw.mu.Unlock()
+
+	for _, task := range due {
+		tw.Logger.Printf("%s[%d] run task %v, scheduled at %s\n",
+			logPrefix, currentPos, task.key, task.scheduledAt.Format("15:04:05.000"))
+
+		go tw.safeHandle(task.data)
 	}
 }
 
 func (tw *TimeWheel) addTask(task *Task) {
 	tw.mu.Lock()
 	defer tw.mu.Unlock()
+
+	if tw.stopped {
+		return
+	}
 
 	pos, cycle := calcPositionAndCycle(task.delay, tw.TickDuration, tw.SlotNum, tw.currentPos)
 	task.cycle = cycle
@@ -220,28 +245,20 @@ func (tw *TimeWheel) addTask(task *Task) {
 	tw.Logger.Printf("%s[%d] add task %v to position %d, cycle %d, scheduled at %s\n",
 		logPrefix, tw.currentPos, task.key, pos, cycle, task.scheduledAt.Format("15:04:05.000"))
 
-	tw.slots[pos].PushBack(task)
-	tw.taskList[task.key] = pos
+	elem := tw.slots[pos].PushBack(task)
+	tw.taskIndex[task.key] = taskEntry{slot: pos, elem: elem}
 }
 
 func (tw *TimeWheel) removeTask(key string) {
 	tw.mu.Lock()
 	defer tw.mu.Unlock()
 
-	position, ok := tw.taskList[key]
+	entry, ok := tw.taskIndex[key]
 	if !ok {
 		return
 	}
 
-	l := tw.slots[position]
-	for e := l.Front(); e != nil; {
-		task := e.Value.(*Task)
-		if task.key == key {
-			delete(tw.taskList, task.key)
-			l.Remove(e)
-			return
-		}
-
-		e = e.Next()
-	}
+	l := tw.slots[entry.slot]
+	l.Remove(entry.elem)
+	delete(tw.taskIndex, key)
 }
