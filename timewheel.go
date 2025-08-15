@@ -26,6 +26,7 @@ type TimeWheel struct {
 	removeTaskCh chan string          // channel for removing tasks
 	stopCh       chan struct{}        // channel for stopping the time wheel
 	stopped      bool
+	started      bool
 	mu           sync.Mutex
 }
 
@@ -55,11 +56,13 @@ func (tw *TimeWheel) initSlots() {
 // Start starts the time wheel.
 func (tw *TimeWheel) Start() {
 	tw.mu.Lock()
-	if tw.stopped {
+	if tw.started || tw.stopped {
 		tw.mu.Unlock()
 		return
 	}
+	tw.started = true
 	tw.mu.Unlock()
+
 	tw.ticker = time.NewTicker(tw.TickDuration)
 	go tw.watch()
 }
@@ -75,6 +78,7 @@ func (tw *TimeWheel) Stop() {
 	close(tw.stopCh)
 	t := tw.ticker
 	tw.mu.Unlock()
+
 	if t != nil {
 		t.Stop()
 	}
@@ -137,9 +141,10 @@ func (tw *TimeWheel) GetTaskSize() int {
 	tw.mu.Lock()
 	defer tw.mu.Unlock()
 
-	tw.Logger.Printf("%s[%d] current task size: %d\n", logPrefix, tw.currentPos, len(tw.taskIndex))
+	n := len(tw.taskIndex)
+	tw.Logger.Printf("%s[%d] current task size: %d", logPrefix, tw.currentPos, n)
 
-	return len(tw.taskIndex)
+	return n
 }
 
 func (tw *TimeWheel) watch() {
@@ -202,22 +207,18 @@ func (tw *TimeWheel) runTask() {
 		next := e.Next()
 		l.Remove(e)
 		delete(tw.taskIndex, task.key)
-		e = next
 		due = append(due, task)
+		e = next
 	}
 
 	currentPos := tw.currentPos
 
-	if tw.currentPos == tw.SlotNum-1 { // already at the last slot, reset to 0
-		tw.currentPos = 0
-	} else {
-		tw.currentPos++
-	}
+	tw.currentPos = (tw.currentPos + 1) % tw.SlotNum
 	tw.mu.Unlock()
 
 	for _, task := range due {
-		tw.Logger.Printf("%s[%d] run task %v, scheduled at %s\n",
-			logPrefix, currentPos, task.key, task.scheduledAt.Format("15:04:05.000"))
+		tw.Logger.Printf("%s[%d] run task %v, scheduled at %s, drift %v",
+			logPrefix, currentPos, task.key, task.scheduledAt.Format("15:04:05.000"), time.Since(task.scheduledAt))
 
 		go tw.safeHandle(task.data)
 	}
@@ -237,12 +238,12 @@ func (tw *TimeWheel) addTask(task *Task) {
 	// if the task is already in the current position and cycle is 0, execute it immediately
 	// this is to avoid the task missing execution due to the lock
 	if pos == tw.currentPos && cycle == 0 {
-		tw.Logger.Printf("%s[%d] run task %v immediately\n", logPrefix, tw.currentPos, task.key)
+		tw.Logger.Printf("%s[%d] run task %v immediately", logPrefix, tw.currentPos, task.key)
 		go tw.safeHandle(task.data)
 		return
 	}
 
-	tw.Logger.Printf("%s[%d] add task %v to position %d, cycle %d, scheduled at %s\n",
+	tw.Logger.Printf("%s[%d] add task %v to position %d, cycle %d, scheduled at %s",
 		logPrefix, tw.currentPos, task.key, pos, cycle, task.scheduledAt.Format("15:04:05.000"))
 
 	elem := tw.slots[pos].PushBack(task)
